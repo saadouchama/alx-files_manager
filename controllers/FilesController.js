@@ -139,19 +139,34 @@ export default class FilesController {
     });
   }
 
-  static async getShow(request, response) {
-    const user = await FilesController.getUser(request);
-    if (!user) {
-      return response.status(401).json({ error: "Unauthorized" });
-    }
-    const fileId = request.params.id;
-    const files = dbClient.db.collection("files");
-    const idObject = new ObjectID(fileId);
-    const file = await files.findOne({ _id: idObject, userId: user._id });
+  static async getShow(req, res) {
+    const { user } = req;
+    const id = req.params ? req.params.id : NULL_ID;
+    const userId = user._id.toString();
+    const file = await (
+      await dbClient.filesCollection()
+    ).findOne({
+      _id: new mongoDBCore.BSON.ObjectId(isValidId(id) ? id : NULL_ID),
+      userId: new mongoDBCore.BSON.ObjectId(
+        isValidId(userId) ? userId : NULL_ID
+      ),
+    });
+
     if (!file) {
-      return response.status(404).json({ error: "Not found" });
+      res.status(404).json({ error: "Not found" });
+      return;
     }
-    return response.status(200).json(file);
+    res.status(200).json({
+      id,
+      userId,
+      name: file.name,
+      type: file.type,
+      isPublic: file.isPublic,
+      parentId:
+        file.parentId === ROOT_FOLDER_ID.toString()
+          ? 0
+          : file.parentId.toString(),
+    });
   }
 
   /**
@@ -159,52 +174,50 @@ export default class FilesController {
    * @param {Request} req The Express request object.
    * @param {Response} res The Express response object.
    */
-  static async getIndex(request, response) {
-    const user = await FilesController.getUser(request);
-    if (!user) {
-      return response.status(401).json({ error: "Unauthorized" });
-    }
-    const { parentId, page } = request.query;
-    const pageNum = page || 0;
-    const files = dbClient.db.collection("files");
-    let query;
-    if (!parentId) {
-      query = { userId: user._id };
-    } else {
-      query = { userId: user._id, parentId: ObjectID(parentId) };
-    }
-    files
-      .aggregate([
-        { $match: query },
+  static async getIndex(req, res) {
+    const { user } = req;
+    const parentId = req.query.parentId || ROOT_FOLDER_ID.toString();
+    const page = /\d+/.test((req.query.page || "").toString())
+      ? Number.parseInt(req.query.page, 10)
+      : 0;
+    const filesFilter = {
+      userId: user._id,
+      parentId:
+        parentId === ROOT_FOLDER_ID.toString()
+          ? parentId
+          : new mongoDBCore.BSON.ObjectId(
+              isValidId(parentId) ? parentId : NULL_ID
+            ),
+    };
+
+    const files = await (
+      await (
+        await dbClient.filesCollection()
+      ).aggregate([
+        { $match: filesFilter },
         { $sort: { _id: -1 } },
+        { $skip: page * MAX_FILES_PER_PAGE },
+        { $limit: MAX_FILES_PER_PAGE },
         {
-          $facet: {
-            metadata: [
-              { $count: "total" },
-              { $addFields: { page: parseInt(pageNum, 10) } },
-            ],
-            data: [{ $skip: 20 * parseInt(pageNum, 10) }, { $limit: 20 }],
+          $project: {
+            _id: 0,
+            id: "$_id",
+            userId: "$userId",
+            name: "$name",
+            type: "$type",
+            isPublic: "$isPublic",
+            parentId: {
+              $cond: {
+                if: { $eq: ["$parentId", "0"] },
+                then: 0,
+                else: "$parentId",
+              },
+            },
           },
         },
       ])
-      .toArray((err, result) => {
-        if (result) {
-          const final = result[0].data.map((file) => {
-            const tmpFile = {
-              ...file,
-              id: file._id,
-            };
-            delete tmpFile._id;
-            delete tmpFile.localPath;
-            return tmpFile;
-          });
-          // console.log(final);
-          return response.status(200).json(final);
-        }
-        console.log("Error occured");
-        return response.status(404).json({ error: "Not found" });
-      });
-    return null;
+    ).toArray();
+    res.status(200).json(files);
   }
 
   static async putPublish(req, res) {
